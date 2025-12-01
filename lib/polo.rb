@@ -1,3 +1,4 @@
+require "set"
 require "polo/version"
 require "polo/collector"
 require "polo/translator"
@@ -43,6 +44,45 @@ module Polo
     Traveler.collect(base_class, id, dependencies).translate(defaults)
   end
 
+  # Public: Streaming version of explore that yields SQL statements in batches.
+  # Uses find_in_batches to process records in memory-efficient chunks.
+  #
+  # base_class - An ActiveRecord::Base class for the seed record.
+  # id - An ID or array of IDs to find records (optional, nil streams all records).
+  # dependencies - Association dependency tree (same format as explore).
+  # batch_size - Number of records to process per batch (default: 1000).
+  #
+  # Yields arrays of INSERT SQL statements for each batch.
+  #
+  # Example:
+  #   Polo.explore_stream(User, user_ids, :posts, batch_size: 500) do |statements|
+  #     statements.each { |sql| file.puts(sql) }
+  #   end
+  #
+  def self.explore_stream(base_class, id = nil, dependencies = {}, batch_size: 1000)
+    seen_statements = Set.new
+
+    scope = if id.nil?
+      base_class.all
+    else
+      ids = Array(id)
+      return if ids.empty?
+      base_class.where(base_class.primary_key => ids)
+    end
+
+    scope.find_in_batches(batch_size: batch_size) do |batch_records|
+      batch_ids = batch_records.map(&:id)
+
+      batch_statements = batch_ids.flat_map do |record_id|
+        Traveler.collect(base_class, record_id, dependencies).translate(defaults)
+      end
+
+      new_statements = batch_statements.reject { |stmt| seen_statements.include?(stmt) }
+      new_statements.each { |stmt| seen_statements.add(stmt) }
+
+      yield new_statements unless new_statements.empty?
+    end
+  end
 
   # Public: Sets up global settings for Polo
   #
