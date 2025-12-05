@@ -1,8 +1,9 @@
-require "set"
 require "polo/version"
 require "polo/collector"
 require "polo/translator"
 require "polo/configuration"
+require "polo/streaming_collector"
+require "polo/streaming_translator"
 require "initializers/arel"
 require "initializers/big_decimal"
 
@@ -45,7 +46,11 @@ module Polo
   end
 
   # Public: Streaming version of explore that yields SQL statements in batches.
-  # Uses find_in_batches to process records in memory-efficient chunks.
+  # Uses find_in_batches to process records AND associations in memory-efficient chunks.
+  #
+  # This method streams both:
+  # 1. Base records in batches (when multiple IDs provided)
+  # 2. Associations for each record in batches (handles large association trees)
   #
   # base_class - An ActiveRecord::Base class for the seed record.
   # id - An ID or array of IDs to find records (optional, nil streams all records).
@@ -59,29 +64,8 @@ module Polo
   #     statements.each { |sql| file.puts(sql) }
   #   end
   #
-  def self.explore_stream(base_class, id = nil, dependencies = {}, batch_size: 1000)
-    seen_statements = Set.new
-
-    scope = if id.nil?
-      base_class.all
-    else
-      ids = Array(id)
-      return if ids.empty?
-      base_class.where(base_class.primary_key => ids)
-    end
-
-    scope.find_in_batches(batch_size: batch_size) do |batch_records|
-      batch_ids = batch_records.map(&:id)
-
-      batch_statements = batch_ids.flat_map do |record_id|
-        Traveler.collect(base_class, record_id, dependencies).translate(defaults)
-      end
-
-      new_statements = batch_statements.reject { |stmt| seen_statements.include?(stmt) }
-      new_statements.each { |stmt| seen_statements.add(stmt) }
-
-      yield new_statements unless new_statements.empty?
-    end
+  def self.explore_stream(base_class, id, dependencies = {}, batch_size: 1000, &block)
+    StreamingTraveler.collect_stream(base_class, id, dependencies, defaults, batch_size, &block)
   end
 
   # Public: Sets up global settings for Polo
@@ -124,6 +108,49 @@ module Polo
 
     def translate(configuration=Configuration.new)
       Translator.new(@selects, configuration).translate
+    end
+  end
+
+  class StreamingTraveler
+    def self.collect_stream(base_class, id, dependencies, configuration, batch_size, &block)
+      new(base_class, id, dependencies, configuration, batch_size).stream(&block)
+    end
+
+    def initialize(base_class, id, dependencies, configuration, batch_size)
+      @base_class = base_class
+      @id = id
+      @dependencies = dependencies
+      @configuration = configuration
+      @batch_size = batch_size
+      @seen_records = {}
+    end
+
+    def stream(&block)
+      scope.find_in_batches(batch_size: @batch_size) do |batch_records|
+        batch_records.each do |record|
+          record_key = "#{record.class.name}_#{record.send(record.class.primary_key)}"
+          next if @seen_records[record_key]
+          @seen_records[record_key] = true
+
+          collector = StreamingCollector.new(
+            @base_class,
+            record.send(@base_class.primary_key),
+            @dependencies,
+            @seen_records
+          )
+
+          collector.collect_stream(batch_size: @batch_size) do |records|
+            statements = StreamingTranslator.new(records, @configuration).translate
+            yield statements unless statements.empty?
+          end
+        end
+      end
+    end
+
+    private
+
+    def scope
+      @base_class.where(@base_class.primary_key => @id)
     end
   end
 end

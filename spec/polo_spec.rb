@@ -78,6 +78,40 @@ describe Polo do
     end
   end
 
+  describe 'explore_stream' do
+    it 'generates insert queries in batches' do
+      inserts = []
+      Polo.explore_stream(AR::Chef, 1, :recipes, batch_size: 10) do |batch|
+        inserts.concat(batch)
+      end
+
+      insert = %q{INSERT INTO "chefs" ("id", "name", "email") VALUES (1, 'Netto', 'nettofarah@gmail.com');}
+      expect(inserts).to include(insert)
+    end
+
+    it 'generates queries for nested dependencies' do
+      patty = %q{INSERT INTO "ingredients" ("id", "name", "quantity") VALUES (3, 'Patty', '1');}
+
+      inserts = []
+      Polo.explore_stream(AR::Chef, 1, { recipes: :ingredients }, batch_size: 10) do |batch|
+        inserts.concat(batch)
+      end
+
+      expect(inserts).to include(patty)
+    end
+
+    it 'produces equivalent results to regular explore' do
+      regular = Polo.explore(AR::Chef, 1, { recipes: :ingredients })
+
+      streaming = []
+      Polo.explore_stream(AR::Chef, 1, { recipes: :ingredients }, batch_size: 100) do |batch|
+        streaming.concat(batch)
+      end
+
+      expect(streaming.sort).to eq(regular.sort)
+    end
+  end
+
   describe "Advanced Options" do
     describe 'obfuscate: [fields]' do
 
