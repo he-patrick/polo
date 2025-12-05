@@ -110,6 +110,51 @@ describe Polo do
 
       expect(streaming.sort).to eq(regular.sort)
     end
+
+    it 'buffers small batches together to reduce callback count' do
+      batch_count = 0
+      inserts = []
+
+      Polo.explore_stream(AR::Chef, 1, { recipes: :ingredients }, batch_size: 1000) do |batch|
+        batch_count += 1
+        inserts.concat(batch)
+      end
+
+      expect(batch_count).to be < inserts.size
+    end
+
+    it 'consolidates records into batches near batch_size' do
+      small_batch_count = 0
+      small_batch_inserts = []
+
+      Polo.explore_stream(AR::Chef, 1, { recipes: :ingredients }, batch_size: 2) do |batch|
+        small_batch_count += 1
+        small_batch_inserts.concat(batch)
+      end
+
+      large_batch_count = 0
+      large_batch_inserts = []
+
+      Polo.explore_stream(AR::Chef, 1, { recipes: :ingredients }, batch_size: 1000) do |batch|
+        large_batch_count += 1
+        large_batch_inserts.concat(batch)
+      end
+
+      expect(small_batch_inserts.sort).to eq(large_batch_inserts.sort)
+
+      expect(large_batch_count).to be <= small_batch_count
+    end
+
+    it 'flushes remaining records at end of stream' do
+      total_from_batches = 0
+      Polo.explore_stream(AR::Chef, 1, { recipes: :ingredients }, batch_size: 1000) do |batch|
+        total_from_batches += batch.size
+      end
+
+      regular = Polo.explore(AR::Chef, 1, { recipes: :ingredients })
+
+      expect(total_from_batches).to eq(regular.size)
+    end
   end
 
   describe "Advanced Options" do

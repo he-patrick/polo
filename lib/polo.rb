@@ -123,6 +123,7 @@ module Polo
       @configuration = configuration
       @batch_size = batch_size
       @seen_records = {}
+      @buffer = []
     end
 
     def stream(&block)
@@ -140,14 +141,24 @@ module Polo
           )
 
           collector.collect_stream(batch_size: @batch_size) do |records|
-            statements = StreamingTranslator.new(records, @configuration).translate
-            yield statements unless statements.empty?
+            @buffer.concat(records)
+            flush_buffer(&block) if @buffer.size >= @batch_size
           end
         end
       end
+
+      flush_buffer(&block) if @buffer.any?
     end
 
     private
+
+    def flush_buffer(&block)
+      return if @buffer.empty?
+
+      statements = StreamingTranslator.new(@buffer, @configuration).translate
+      yield statements unless statements.empty?
+      @buffer = []
+    end
 
     def scope
       @base_class.where(@base_class.primary_key => @id)
